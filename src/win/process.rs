@@ -8,7 +8,9 @@ use std::ptr::null_mut;
 
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
 use windows_sys::Win32::Foundation::ERROR_MORE_DATA;
+use windows_sys::Win32::Foundation::FILETIME;
 use windows_sys::Win32::Foundation::LUID;
 use windows_sys::Win32::Security::AdjustTokenPrivileges;
 use windows_sys::Win32::Security::GetTokenInformation;
@@ -36,6 +38,7 @@ use windows_sys::Win32::System::Services::SC_MANAGER_ENUMERATE_SERVICE;
 use windows_sys::Win32::System::Services::SERVICE_ACTIVE;
 use windows_sys::Win32::System::Services::SERVICE_WIN32;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::Win32::System::Threading::GetProcessTimes;
 use windows_sys::Win32::System::Threading::IsProcessCritical;
 use windows_sys::Win32::System::Threading::OpenProcess;
 use windows_sys::Win32::System::Threading::OpenProcessToken;
@@ -228,11 +231,38 @@ pub fn services_by_pid() -> HashMap<u32, Vec<String>> {
     services
 }
 
-/// Ends process `pid`.
-pub fn terminate(pid: u32) -> Result<()> {
-    let process = open(pid, PROCESS_TERMINATE)
+/// Returns the creation time of process `pid` (as a raw `FILETIME` value), which together with the PID identifies a process even after its PID is reused. `None` if it cannot be queried.
+pub fn start_time(pid: u32) -> Option<u64> {
+    let process = open(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
+    creation_time(&process)
+}
+
+fn creation_time(process: &OwnedHandle) -> Option<u64> {
+    let mut created = FILETIME::default();
+    let mut unused = FILETIME::default();
+    let (mut exited, mut kernel) = (unused, unused);
+    // SAFETY: all four FILETIME out-pointers are writable.
+    let ok = unsafe {
+        GetProcessTimes(
+            process.raw(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut unused,
+        )
+    };
+    (ok != 0).then(|| (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+}
+
+/// Ends process `pid`, but only if it is still the process that started at `expected_start` (see [`start_time`]). This keeps a PID that was reused after the scan from being killed by mistake.
+pub fn terminate(pid: u32, expected_start: u64) -> Result<()> {
+    let process = open(pid, PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION)
         .ok_or_else(io::Error::last_os_error)
         .with_context(|| format!("cannot open process {pid}"))?;
+    // Checked on the same handle that terminates, so the process cannot change in between.
+    if creation_time(&process) != Some(expected_start) {
+        bail!("process {pid} has exited and its PID now belongs to another process; not ending it");
+    }
     // SAFETY: `process` is a live handle with PROCESS_TERMINATE.
     if unsafe { TerminateProcess(process.raw(), 1) } == 0 {
         return Err(io::Error::last_os_error())

@@ -84,6 +84,7 @@ pub fn scan(volume: &Volume) -> Result<Scan> {
         image: process::image_path(pid),
         services: services.remove(&pid).unwrap_or_default(),
         critical: process::is_critical(pid),
+        started: process::start_time(pid),
     });
     Ok(Scan {
         holders,

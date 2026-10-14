@@ -45,12 +45,19 @@ fn main() -> Result<()> {
         "{}",
         render(&scan.holders, &label, scan.context, cli.verbose)
     );
-    if !scan.elevated {
+    if scan.inaccessible > 0 {
         eprintln!();
-        eprintln!(
-            "warning: not running as Administrator; {} processes could not be inspected, so other users' processes and services may be missing. Run from an elevated terminal for a complete list.",
-            scan.inaccessible
-        );
+        if scan.elevated {
+            eprintln!(
+                "note: {} protected processes (for example antivirus or core Windows processes) could not be inspected; if one of them holds {label}, it is not listed above.",
+                scan.inaccessible
+            );
+        } else {
+            eprintln!(
+                "warning: not running as Administrator; {} processes could not be inspected, so other users' processes and services may be missing. Run from an elevated terminal for a more complete list.",
+                scan.inaccessible
+            );
+        }
     }
     if scan.timed_out > 0 {
         eprintln!(
@@ -61,7 +68,7 @@ fn main() -> Result<()> {
     if scan.holders.is_empty() {
         if scan.elevated {
             println!(
-                "If Windows still refuses to eject {label}, a driver or Windows itself may be using it (for example a page file, indexing, or antivirus scanning)."
+                "If Windows still refuses to eject {label}, a driver, a protected process, or Windows itself may be using it (for example a page file, indexing, or antivirus scanning)."
             );
         }
         return Ok(());
@@ -85,7 +92,11 @@ fn main() -> Result<()> {
         if !cli.yes && !confirm(&mut stdin, &format!("End {name} (PID {pid})? [y/N] "))? {
             continue;
         }
-        match process::terminate(pid) {
+        // `kill_refusal` guarantees a known start time.
+        let Some(started) = holder.info.started else {
+            continue;
+        };
+        match process::terminate(pid, started) {
             Ok(()) => {
                 println!("Ended {name} (PID {pid})");
                 killed += 1;

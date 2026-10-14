@@ -30,6 +30,8 @@ pub struct ProcessInfo {
     pub services: Vec<String>,
     /// Ending the process would crash Windows.
     pub critical: bool,
+    /// Creation time from `process::start_time`; `None` if it could not be queried.
+    pub started: Option<u64>,
 }
 
 /// A process holding files on the volume.
@@ -83,6 +85,9 @@ impl Holder {
                 "it hosts Windows services; stop them instead with {}",
                 commands.join(", ")
             ));
+        }
+        if self.info.started.is_none() {
+            return Some("its start time cannot be read, so it cannot be told apart from a later process reusing its PID".to_string());
         }
         None
     }
@@ -197,6 +202,7 @@ mod tests {
     fn info(name: &str) -> ProcessInfo {
         ProcessInfo {
             name: name.to_string(),
+            started: Some(1),
             ..Default::default()
         }
     }
@@ -258,6 +264,16 @@ mod tests {
             (holder(4, info("System")), "System"),
             (holder(600, critical), "critical"),
             (holder(700, service), "`sc stop WSearch`"),
+            (
+                holder(
+                    800,
+                    ProcessInfo {
+                        started: None,
+                        ..info("game.exe")
+                    },
+                ),
+                "start time",
+            ),
         ];
         for (holder, expected) in cases {
             let reason = holder.kill_refusal(CONTEXT).expect("should be refused");
