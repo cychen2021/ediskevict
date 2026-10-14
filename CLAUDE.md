@@ -12,7 +12,7 @@ The problem it solves: after installing Epic Games titles on an external SSD (`D
 
 ## Status
 
-The project is a freshly initialized Cargo binary crate (`src/main.rs` is still the hello-world stub, with `anyhow` and `clap` already added as dependencies). Follow the conventions below (taken from the author's [vischat](https://github.com/cychen2021/vischat) project) and update this file as the architecture takes shape. `AGENTS.md` mirrors this file, so keep the two identical. Shared skills live in the `.claude/skills` git submodule (`cychen2021/claude-skills`); run `git submodule update --init` after cloning.
+The tool is implemented: `ediskevict <VOLUME> [--kill] [--yes] [--verbose]` (see README.md). Follow the conventions below (taken from the author's [vischat](https://github.com/cychen2021/vischat) project). `AGENTS.md` is a symlink to this file. Shared skills live in the `.claude/skills` git submodule (`cychen2021/claude-skills`); run `git submodule update --init` after cloning.
 
 ## Commands
 
@@ -21,24 +21,24 @@ cargo build                      # build
 cargo run -- <args>              # run, e.g. `cargo run -- D:`
 cargo test                       # all tests
 cargo test <name_substring>      # tests whose name contains the substring
-cargo test --test <file_stem>    # one integration test file under tests/
+cargo test --test <file_stem>    # one integration test file: `scan` (scans the temp dir's volume) or `cli`
 cargo clippy --all-targets       # lint
 cargo fmt                        # format
-cargo insta test / cargo insta review   # snapshot tests, if insta is used for output rendering
 ```
 
 Enumerating handles that belong to other users' processes, and killing them, usually needs an elevated (Administrator) terminal. Expect partial results when not elevated, and report that to the user instead of failing silently.
 
-## Design notes
+## Architecture
 
-- Windows only. "In use" can mean several things, and a complete answer should cover all of them for a given volume:
-  - Open file or directory handles whose path is on the volume. This is the usual cause. Enumerate system handles (`NtQuerySystemInformation` with `SystemExtendedHandleInformation`, then duplicate each handle and `NtQueryObject`/`GetFinalPathNameByHandleW`) and match path prefixes against the volume. Querying the name of some handle types (for example synchronous named pipes) can block forever, so do it with a timeout or skip non-file handle types.
-  - Processes whose executable image or loaded DLLs live on the volume (for example the game itself, or launcher helpers).
-  - Processes whose current working directory is on the volume.
-- Restart Manager (`RmGetList`) only takes individual file paths, not a whole volume. It is useful for checking known files, but it cannot replace handle enumeration.
-- Match volumes robustly: a drive letter, a `\\?\Volume{GUID}\` path and an NT device path (`\Device\HarddiskVolumeN\...`) can all refer to the same disk, and one physical disk can hold several volumes.
-- Killing must be opt-in, and the tool should confirm before it kills anything. Some holders cannot or should not be killed (`System` PID 4, services such as `SearchIndexer.exe` or antivirus). Report these clearly, and suggest an alternative such as stopping the service, instead of attempting the kill.
-- Likely Win32 binding crates are `windows` or `windows-sys`. Keep `unsafe` FFI behind a small safe module so that the CLI and output layers stay safe Rust.
+The pipeline is `main.rs` → `Volume::resolve` → `scan::scan` → `report::group`/`render` → optional `process::terminate`. All `unsafe` FFI (`windows-sys`) is confined to `src/win/`; everything above it is safe Rust, and the pure logic (`volume.rs` matching, `report.rs` grouping, kill refusals and rendering) is unit-tested without touching Windows.
+
+- `volume.rs`: everything is matched on the NT device name (`\Device\HarddiskVolumeN`), because that is the form both handle paths (`GetFinalPathNameByHandleW` with `VOLUME_NAME_NT`) and memory mappings (`GetMappedFileNameW`) come back in. A user spec (drive letter, path, or `\\?\Volume{GUID}\`) is resolved spec → mount point → GUID path → device; `display_path` maps device paths back to the first mount point.
+- `scan.rs` combines two sources, which together cover the three ways a volume is "in use":
+  - `win/handles.rs`: open file and directory handles (which include each process's working directory). It reads the system handle table (`NtQuerySystemInformation`, class 64; the entry struct is defined locally because `windows-sys` lacks it). The "File" object type index varies by Windows build, so it is learned by finding a handle this process opened to its own exe. Each candidate handle is duplicated and named on a worker thread with a 500 ms timeout, because name queries on synchronous pipes can block forever; on timeout the worker and the duplicated handle are deliberately leaked, never closed.
+  - `win/memory.rs`: files mapped into memory (exe, DLLs, mapped data files), via `VirtualQueryEx` + `GetMappedFileNameW`. The loader closes its file handles, so handle enumeration alone misses these.
+- `report.rs`: `Holder::kill_refusal` is the single place that decides what must never be killed: this process, its parent shell, PIDs ≤ 4, critical processes (`IsProcessCritical`), and service hosts (suggesting `sc stop` instead). `main.rs` additionally refuses `--kill` on the system volume before scanning, and treats end of stdin as "no" at each prompt.
+- When elevated, the scan enables `SeDebugPrivilege`; when not, it reports how many processes it could not inspect instead of failing.
+- Restart Manager (`RmGetList`) was rejected: it takes individual file paths, not a whole volume.
 
 ## Conventions (from vischat)
 
