@@ -50,3 +50,7 @@ If nothing is found but Windows still refuses to eject, the holder is likely a d
 cargo build --release
 cargo test
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
